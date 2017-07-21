@@ -1,64 +1,67 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"time"
 )
 
-func shutdownWaiter(s chan os.Signal, numWorkers int) {
-	signal.Notify(s, os.Interrupt)
-	go func() {
-		for _ = range s {
-			// sig is a ^C, handle it
-			fmt.Println(" interruption received!")
-			close(s)
-		}
-	}()
+func main() {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+
+	go watchForShutdown(cancelFunc)
+
+	messageChan := make(chan int)
+	go receiver(messageChan)
+	launchSenders(ctx, messageChan)
+
+	log.Println("program terminated")
 }
 
-func printWorker(c chan time.Time) {
-	for myTime := range c {
-		fmt.Println(myTime)
+func watchForShutdown(cancelContext func()) {
+	killswitch := make(chan os.Signal)
+	signal.Notify(killswitch, os.Interrupt)
+	for _ = range killswitch {
+		fmt.Println(" interruption received!")
+		cancelContext()
+		close(killswitch)
 	}
 }
 
-func loadWorker(c chan time.Time, s chan os.Signal, numWorkers int, num int) {
+func receiver(c chan int) {
+	for id := range c {
+		log.Printf("received message from %d\n", id)
+	}
+}
+
+func launchSenders(ctx context.Context, messageChan chan int) {
+	var wg sync.WaitGroup
+	numSenders := 3
+	for i := 0; i < numSenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sender(ctx, messageChan, numSenders, i)
+		}()
+		time.Sleep(1 * time.Second) // stagger startup of routines
+	}
+
+	wg.Wait()
+	close(messageChan) // tell receiver that its work is complete
+}
+
+func sender(ctx context.Context, c chan int, numSenders int, id int) {
 	for {
 		select {
-		case <-s:
-			fmt.Println("Worker", num, "saw stop signal")
+		case <-ctx.Done():
+			log.Printf("worker %d noticed termination signal and shut down\n", id)
 			return
-		case c <- time.Now():
-			time.Sleep(time.Duration(numWorkers) * time.Second)
+		case c <- id:
+			time.Sleep(time.Duration(numSenders) * time.Second)
 		}
 	}
-}
-
-func main() {
-	c := make(chan time.Time)
-	shutdownChan := make(chan os.Signal, 1)
-	var wg sync.WaitGroup
-	numWorkers := 3
-
-	go shutdownWaiter(shutdownChan, numWorkers)
-
-	go printWorker(c)
-
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-
-		time.Sleep(1 * time.Second)
-		go func(num int) {
-			defer wg.Done()
-			loadWorker(c, shutdownChan, numWorkers, num)
-		}(i)
-
-	}
-
-	wg.Wait() // Wait for loadWorkers to reach Done
-	close(c)  // Tell printWorker to not expect any new entries to chan
-	fmt.Println("Program terminated")
 }
